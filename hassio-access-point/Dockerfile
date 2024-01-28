@@ -1,7 +1,7 @@
 ARG BUILD_FROM
 FROM $BUILD_FROM
 
-MAINTAINER Matt Longman <git@mattlongman.com>
+MAINTAINER ROBOT0-VT <https://twitch.tv/ROBOT0-VT>
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
