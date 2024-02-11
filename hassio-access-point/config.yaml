@@ -1,6 +1,6 @@
 ---
 name: Hass.io Access Point
-version: 0.5.0
+version: 0.5.0-dev-4
 slug: hassio-access-point
 description: Create a WiFi access point to directly connect devices to Home Assistant
 arch: [armhf, armv7, aarch64, amd64, i386]
@@ -8,6 +8,7 @@ url: https://github.com/mattlongman/hassio-access-point
 startup: system
 boot: auto
 host_network: true
+hassio_api: true
 apparmor: true
 host_dbus: true
 privileged:
