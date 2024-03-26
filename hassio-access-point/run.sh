@@ -1,198 +1,174 @@
 #!/usr/bin/with-contenv bashio
 
+DNSMASQ_CONFIG=/etc/dnsmasq.conf
+HOSTAPD_CONFIG=/etc/hostapd.conf
+WIRELESS_INTERFACE=$(bashio::config interface)
+VIRTUAL_INTERFACE=hassioap-$WIRELESS_INTERFACE
+
 # SIGTERM-handler: this function will be executed when the container receives the SIGTERM signal (when stopping)
 term_handler(){
-	logger "Stopping Hass.io Access Point" 0
-    nmcli -t dev set $INTERFACE managed yes
-	ip link set $INTERFACE down
-	ip addr flush dev $INTERFACE
+	bashio::log.notice "Stopping Hass.io Access Point"
+    iw dev "$VIRTUAL_INTERFACE" del
 	exit 0
 }
 
-# Logging function to set verbosity of output to addon log
-logger(){
-    msg=$1
-    level=$2
-    if [ $DEBUG -ge $level ]; then
-        echo $msg
-    fi
-}
-
-CONFIG_PATH=/data/options.json
+# Remove old `debug` config option
+if bashio::config.exists debug; then bashio::addon.option debug;fi
 
 # Convert integer configs to boolean, to avoid a breaking old configs
-declare -r bool_configs=( hide_ssid client_internet_access dhcp )
-for i in $bool_configs ; do
-    if bashio::config.true $i || bashio::config.false $i ; then
+for i in hide_ssid client_internet_access dhcp ; do
+    if bashio::config.true "$i" || bashio::config.false "$i" ; then
         continue
-    elif [ $config_value -eq 0 ] ; then
-        bashio::addon.option $config_value false
+    elif [ $i -eq 0 ] ; then
+        bashio::addon.option $i false
     else
-        bashio::addon.option $config_value true
+        bashio::addon.option $i true
     fi
 done
 
-SSID=$(bashio::config "ssid")
-WPA_PASSPHRASE=$(bashio::config "wpa_passphrase")
-CHANNEL=$(bashio::config "channel")
-ADDRESS=$(bashio::config "address")
-NETMASK=$(bashio::config "netmask")
-BROADCAST=$(bashio::config "broadcast")
-INTERFACE=$(bashio::config "interface")
-HIDE_SSID=$(bashio::config.false "hide_ssid"; echo $?)
-DHCP=$(bashio::config.false "dhcp"; echo $?)
-DHCP_START_ADDR=$(bashio::config "dhcp_start_addr" )
-DHCP_END_ADDR=$(bashio::config "dhcp_end_addr" )
-DNSMASQ_CONFIG_OVERRIDE=$(bashio::config 'dnsmasq_config_override' )
-DEBUG=$(bashio::config 'debug' )
-HOSTAPD_CONFIG_OVERRIDE=$(bashio::config 'hostapd_config_override' )
-CLIENT_INTERNET_ACCESS=$(bashio::config.false 'client_internet_access'; echo $?)
-CLIENT_DNS_OVERRIDE=$(bashio::config 'client_dns_override' )
-DNSMASQ_CONFIG_OVERRIDE=$(bashio::config 'dnsmasq_config_override' )
-
-# Get the Default Route interface
-DEFAULT_ROUTE_INTERFACE=$(bashio::network.name)
-
-echo "Starting Hass.io Access Point Addon"
-
-logger "Run command: nmcli dev set $INTERFACE managed no" 1
-nmcli -t dev set $INTERFACE managed no
-
-# Setup signal handlers
-trap 'term_handler' SIGTERM
-
 # Enforces required env variables
-required_vars=(ssid wpa_passphrase channel address netmask broadcast)
-for required_var in $required_vars; do
-    bashio::config.require $required_var "An AP cannot be created without this information"
+for required_var in ssid wpa_passphrase channel address netmask; do
+    bashio::config.require "$required_var" "An AP cannot be created without this information"
 done
-
-if [ ${#WPA_PASSPHRASE} -lt 8 ] ; then
+if [ "$(bashio::config wpa_passphrase | wc -m)" -lt 8 ] ; then
     bashio::exit.nok "The WPA password must be at least 8 characters long!"
 fi
 
+# Set log level from config
+bashio::log.level "$(bashio::config log_level)"
+
+# Setup signal handlers
+trap 'term_handler' SIGTERMd
+
+bashio::log.notice "Starting Hass.io Access Point Addon"
+
+bashio::log.info "Creating virtual interface $VIRTUAL_INTERFACE..."
+ip link set dev "$WIRELESS_INTERFACE" down
+iw dev "$WIRELESS_INTERFACE" interface add "$VIRTUAL_INTERFACE" type __ap
+HARDWARE_MAC=$(bashio::network.interface "network.interface.$WIRELESS_INTERFACE.mac" "$WIRELESS_INTERFACE" ".mac")
+
+#MAC is a hash based on the original interface's MAC address, so it will always be the same for the same hardware
+VIRTUAL_MAC=$(echo "hassio-access-point $HARDWARE_MAC" |md5sum|sed 's/^\(..\)\(..\)\(..\)\(..\)\(..\).*$/02:\1:\2:\3:\4:\5/')
+
+bashio::log.info "Assigning the new interface $VIRTUAL_INTERFACE the following mac address: $VIRTUAL_MAC"
+ip link set dev "$VIRTUAL_INTERFACE" address "$VIRTUAL_MAC"
+if bashio::config.exists broadcast; then
+    ip address add "$(bashio::config address)/$(bashio::config netmask)" dev "$VIRTUAL_INTERFACE" broadcast "$(bashio::config broadcast)"
+else
+    ip address add "$(bashio::config address)/$(bashio::config netmask)" dev "$VIRTUAL_INTERFACE"
+fi
+ip link set dev "$WIRELESS_INTERFACE" up
+
 # Setup hostapd.conf
-logger "# Setup hostapd:" 1
-logger "Add to hostapd.conf: ssid=$(bashio::config ssid)" 1
-echo "ssid=$(bashio::config ssid)" >> /hostapd.conf
-logger "Add to hostapd.conf: wpa_passphrase=********" 1
-echo "wpa_passphrase=$(bashio::config wpa_passphrase)" >> /hostapd.conf
-logger "Add to hostapd.conf: channel=$(bashio::config channel)" 1
-echo "channel=$(bashio::config channel)" >> /hostapd.conf
-logger "Add to hostapd.conf: ignore_broadcast_ssid=$(bashio::var.false HIDE_SSID)$?" 1
-echo "ignore_broadcast_ssid=$(bashio::var.false HIDE_SSID)$?" >> /hostapd.conf
+bashio::log.debug "Setting up hostapd:"
+bashio::log.debug "Add to hostapd.conf: ssid=$(bashio::config ssid)"
+echo "ssid=$(bashio::config ssid)" >> $HOSTAPD_CONFIG
+bashio::log.debug "Add to hostapd.conf: wpa_passphrase=********"
+echo "wpa_passphrase=$(bashio::config wpa_passphrase)" >> $HOSTAPD_CONFIG
+bashio::log.debug "Add to hostapd.conf: channel=$(bashio::config channel)"
+echo "channel=$(bashio::config channel)" >> $HOSTAPD_CONFIG
+bashio::log.debug "Add to hostapd.conf: ignore_broadcast_ssid=$(bashio::var.false hide_ssid)$?"
+echo "ignore_broadcast_ssid=$(bashio::var.false hide_ssid)$?" >> $HOSTAPD_CONFIG
 
 ### MAC address filtering
 ## Allow is more restrictive, so we prioritise that and set
 ## macaddr_acl to 1, and add allowed MAC addresses to hostapd.allow
-if bashio::config.has_value allow_mac_addresses ; then
-    logger "Add to hostapd.conf: macaddr_acl=1" 1
+if bashio::config.has_value allow_mac_addresses; then
+    bashio::log.debug "Add to hostapd.conf: macaddr_acl=1"
     echo "macaddr_acl=1" >> /hostapd.conf
-    logger "# Setup hostapd.allow:" 1
-    logger "Allowed MAC addresses:" 0
-    for mac in $(bashio::config allow_mac_addresses); do
-        echo $mac >> /hostapd.allow
-        logger $mac 0
-    done
-    logger "Add to hostapd.conf: accept_mac_file=/hostapd.allow" 1
+    bashio::log.debug "# Setup hostapd.allow:"
+    bashio::config 'allow_mac_addresses|join("\n")' > /hostapd.allow
+    bashio::log.info "Allowed MAC addresses:"
+    bashio::log.info < /hostapd.allow
+    # for mac in $(bashio::config allow_mac_addresses); do
+    #     echo "$mac" >> /hostapd.allow
+    #     bashio::log.info "   $mac"
+    # done
+    bashio::log.debug "Add to hostapd.conf: accept_mac_file=/hostapd.allow"
     echo "accept_mac_file=/hostapd.allow"$'\n' >> /hostapd.conf
 ## else set macaddr_acl to 0, and add denied MAC addresses to hostapd.deny
 elif bashio::config.has_value deny_mac_addresses; then
-    logger "Add to hostapd.conf: macaddr_acl=0" 1
+    bashio::log.debug "Add to hostapd.conf: macaddr_acl=0"
     echo "macaddr_acl=0" >> /hostapd.conf
-    logger "Denied MAC addresses:" 0
+    bashio::log.info "Denied MAC addresses:"
     for mac in $(bashio::config deny_mac_addresses); do
         echo "$mac" >> /hostapd.deny
-        logger "$mac" 0
+        bashio::log.info "$mac"
     done
-    logger "Add to hostapd.conf: accept_mac_file=/hostapd.deny" 1
+    bashio::log.debug "Add to hostapd.conf: accept_mac_file=/hostapd.deny"
     echo "deny_mac_file=/hostapd.deny" >> /hostapd.conf
 ## else set macaddr_acl to 0, with blank allow and deny files
 else
-    logger "Add to hostapd.conf: macaddr_acl=0" 1
+    bashio::log.debug "Add to hostapd.conf: macaddr_acl=0"
     echo "macaddr_acl=0" >> /hostapd.conf
 fi
 
-# Set address for the selected interface. This replaces the old `/etc/network/interfaces` mechanism
-ip address flush dev $INTERFACE
-ip address add $(bashio::config address)/$(bashio::config netmask) dev $INTERFACE #broadcast
-#ip link set $INTERFACE up
-
 # Add interface to hostapd.conf
-logger "Add to hostapd.conf: interface=$INTERFACE" 1
-echo "interface=$INTERFACE" >> /hostapd.conf
+bashio::log.debug "Add to hostapd.conf: interface=$VIRTUAL_INTERFACE"
+echo "interface=$VIRTUAL_INTERFACE" >> /hostapd.conf
 
 # Append override options to hostapd.conf
 if bashio::config.has_value hostapd_config_override; then
-    logger "# Custom hostapd config options:" 0
+    bashio::log.info "# Custom hostapd config options:"
     for override in $(bashio::config hostapd_config_override); do
-        echo $override >> /hostapd.conf
-        logger "Add to hostapd.conf: $override" 0
+        echo "$override" >> /hostapd.conf
+        bashio::log.info "Add to hostapd.conf: $override"
     done
 fi
 
 # Setup dnsmasq.conf if DHCP is enabled in config
-if $(bashio::config.true "dhcp"); then
-    logger "# DHCP enabled. Setup dnsmasq:" 1
-    logger "Add to dnsmasq.conf: dhcp-range=$DHCP_START_ADDR,$DHCP_END_ADDR,12h" 1
-        echo "dhcp-range=$DHCP_START_ADDR,$DHCP_END_ADDR,12h" >> /dnsmasq.conf
-        logger "Add to dnsmasq.conf: interface=$INTERFACE" 1
-        echo "interface=$INTERFACE" >> /dnsmasq.conf
+if bashio::config.true dhcp; then
+    bashio::log.debug "# DHCP enabled. Setup dnsmasq:"
+    bashio::log.debug "Add to dnsmasq.conf: dhcp-range=$(bashio::config dhcp_start_addr),$(bashio::config dhcp_end_addr),12h"
+    echo "dhcp-range=$(bashio::config dhcp_start_addr),$(bashio::config dhcp_end_addr),12h" >> $DNSMASQ_CONFIG
+    bashio::log.debug "Add to dnsmasq.conf: interface=$VIRTUAL_INTERFACE"
+    echo "interface=$VIRTUAL_INTERFACE" >> $DNSMASQ_CONFIG
 
     ## DNS
+    dns_option="dhcp-option=6,"
     if bashio::config.has_value client_dns_override; then
-        dns_string="dhcp-option=6"
-        for override in $CLIENT_DNS_OVERRIDE; do
-            dns_string+=",$override"
-        done
-        echo $dns_string >> /dnsmasq.conf
-        logger "Add custom DNS: $dns_string" 0
+        echo "$dns_option+$(bashio::config 'client_dns_override|join(",")')" >> $DNSMASQ_CONFIG
+        bashio::log.info "Add custom DNS: $dns_string"
     else
-        declare -a dns_array
-        dns_array=$(bashio::dns.servers)
-
-        if bashio::var.is_empty $dns_array; then
-            bashio::config.suggest "client_dns_override" "The addon was unable to get the host's DNS servers."
-        else
-            dns_string="dhcp-option=6"
-            for dns_entry in dns_array; do
-                dns_string+=",$dns_entry"
-            done
-            echo $dns_string >> /dnsmasq.conf
-            logger "Add DNS: $dns_string" 0
-        fi
+        dns_string="dhcp-option=6,$(bashio::dns.host)"
+        echo "$dns_string" >> $DNSMASQ_CONFIG
+        bashio::log.info "Using Home Assistant as the DNS server"
     fi
 
     # Append override options to dnsmasq.conf
-    if bashio::var.has_value $DNSMASQ_CONFIG_OVERRIDE; then
-        logger "# Custom dnsmasq config options:" 0
-        for override in $DNSMASQ_CONFIG_OVERRIDE; do
-            logger "Add to dnsmasq.conf: $override" 0
-            echo "$override"$'\n' >> /dnsmasq.conf
+    if bashio::config.has_value dnsmasq_config_override; then
+        bashio::log.info "Custom dnsmasq config options:"
+        for override in $(bashio::config dnsmasq_config_override); do
+            bashio::log.info "Add to dnsmasq.conf: $override"
+            echo "$override" >> $DNSMASQ_CONFIG
         done
     fi
 else
-	logger "# DHCP not enabled. Skipping dnsmasq" 1
+	bashio::log.debug "DHCP not enabled. Skipping dnsmasq"
 fi
 
-# Setup Client Internet Access
-if $(bashio::config.true "client_internet_access"); then
+# Configure routing
+bashio::log.debug "Setting up firewall rules"
 
+iptables-nft -i "$VIRTUAL_INTERFACE" -t nat -A POSTROUTING -o "$(bashio::network.name)" -j MASQUERADE
+
+# Setup Client Internet Access
+if bashio::config.true client_internet_access; then
+    bashio::log.debug "Changing routing to allow internet access"
     ## Route traffic
-    iptables-nft -t nat -A POSTROUTING -o $DEFAULT_ROUTE_INTERFACE -j MASQUERADE
-    iptables-nft -P FORWARD ACCEPT
-    iptables-nft -F FORWARD
+    iptables-nft -i "$VIRTUAL_INTERFACE" -P FORWARD ACCEPT
+    iptables-nft -i "$VIRTUAL_INTERFACE" -F FORWARD
 fi
 
 # Start dnsmasq if DHCP is enabled in config
-if $(bashio::config.true "dhcp"); then
-    logger "## Starting dnsmasq daemon" 1
-    dnsmasq -C /dnsmasq.conf
+if bashio::config.true dhcp; then
+    bashio::log.debug "Starting dnsmasq daemon"
+    dnsmasq
 fi
 
-logger "## Starting hostapd daemon" 1
-# If debug level is greater than 1, start hostapd in debug mode
-if [ $DEBUG -gt 1 ]; then
+bashio::log.debug "Starting hostapd daemon"
+# If debug level is DEBUG or greater, start hostapd in debug mode
+if [ "$__BASHIO_LOG_LEVEL" -gt 6 ]; then
     hostapd -d /hostapd.conf & wait ${!}
 else
     hostapd /hostapd.conf & wait ${!}
