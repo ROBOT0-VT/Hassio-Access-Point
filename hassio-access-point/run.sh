@@ -127,7 +127,8 @@ if bashio::config.true dhcp; then
     ## DNS
     dns_option="dhcp-option=6,"
     if bashio::config.has_value client_dns_override; then
-        echo "$dns_option+$(bashio::config 'client_dns_override|join(",")')" >> $DNSMASQ_CONFIG
+        echo "$dns_option+$(bashio::config 'client_dns_override|join(",")')" \
+            >> $DNSMASQ_CONFIG
         bashio::log.info "Add custom DNS: $dns_string"
     else
         dns_string="dhcp-option=6,$(bashio::dns.host)"

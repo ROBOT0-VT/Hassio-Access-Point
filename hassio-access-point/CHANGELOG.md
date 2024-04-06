@@ -5,7 +5,7 @@
 ### Added
 
 - Use a virtual interface for hostapd so that NetworkManager can manage user wifi connections on the hardware interface, closing [Issue #64](https://github.com/mattlongman/Hassio-Access-Point/issues/64) (thanks for the help, @FloerlPhilip!)
--
+- Log new DHCP assignments, closing [Issue #68](https://github.com/mattlongman/Hassio-Access-Point/issues/68) (Thank you, @malkowski!)
 
 ### Changed
 
